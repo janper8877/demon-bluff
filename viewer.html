@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  
+<script defer src="https://extension-files.twitch.tv/helper/v1/twitch-ext.min.js"></script>
+
+  <style>
+    html, body { margin:0; width:100%; height:100%; background:transparent; overflow:hidden; }
+#stage{
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--design-w, 1920px);
+  height: var(--design-h, 1080px);
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+
+/* rozmiar kart */
+
+.card{
+  position: absolute;
+
+  width: calc(var(--design-h, 1080px) * 0.130); /* ~120px at 1080p */
+  max-width: 140px;
+  aspect-ratio: 5.5 / 6.5;
+  height: auto;
+
+  transform: translate(-50%, -50%);
+  border-radius: 14px;
+  box-sizing: border-box;
+
+  /* TO CI WRACA RAMKI + WYGLĄD */
+  border: 2px solid rgba(255,255,255,0.85);
+  background: rgba(0,0,0,0.35);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+
+#stageWrap{
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  z-index: 9999;
+  /* IMPORTANT: stageWrap should NOT be transformed */
+  transform: none;
+}
+
+
+#stageWrap.dragging{ cursor: grabbing; }
+
+#uiScale{
+  position:fixed;
+  left:12px;
+  bottom:80px;
+  z-index:999999;
+  width:180px;
+  opacity:0.85;
+}
+
+  </style>
+</head>
+
+<body>
+  <div style="position:fixed;top:10px;left:10px;z-index:999999;background:#000;color:#fff;padding:8px">
+    EXTENSION LOADED !!!
+  </div>
+
+  <div style="position:fixed;top:10px;left:10px;z-index:9999;background:#111;color:#fff;padding:8px;border-radius:6px;font-family:Arial">
+    viewer.html działa (to jest test)
+  </div>
+
+  <div id="stageWrap">
+    <div id="stage"></div>
+  </div>
+
+<input id="uiScale" type="range" min="0.5" max="1.5" step="0.01" value="1" />
+
+  <script>
+
+   let ilosc_kart = 9;
+
+  let currentRoundId = null;
+  let pollingStarted = false;
+  let streamId = null;
+  let userId = null;
+  let isAuthorized = false;
+
+    // Na start: tylko pokazujemy 5 kart "na sztywno", żeby sprawdzić czy overlay w ogóle działa
+    const stage = document.getElementById("stage");
+    const stageWrap = document.getElementById("stageWrap");
+    const uiScale = document.getElementById("uiScale");
+
+
+
+
+let ui = { x: 0, y: 0, scale: 1 }; 
+// x,y are OFFSETS IN DESIGN FRACTIONS (not window fractions)
+
+
+let design = { w: 1920, h: 1080 }; // updated from Twitch context.videoResolution when available
+let lastContext = null;
+
+function setDesign(w, h) {
+  if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) return;
+  design.w = w;
+  design.h = h;
+  document.documentElement.style.setProperty("--design-w", `${w}px`);
+  document.documentElement.style.setProperty("--design-h", `${h}px`);
+}
+
+function parseResolution(str) {
+  const m = /^(\d{2,5})x(\d{2,5})$/.exec(str || "");
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+}
+
+
+
+/**
+ * Compute the true video content rectangle inside the iframe viewport,
+ * assuming the video is fit-to-container while preserving aspect ratio ("contain").
+ * Uses ONLY window metrics.
+ */
+function getVideoRect() {
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+
+  const videoAR = design.w / design.h;
+  const winAR = vw / vh;
+
+  let x, y, w, h;
+
+  if (winAR > videoAR) {
+    // container too wide => pillarbox left/right
+    h = vh;
+    w = h * videoAR;
+    x = (vw - w) / 2;
+    y = 0;
+  } else {
+    // container too tall => letterbox top/bottom
+    w = vw;
+    h = w / videoAR;
+    x = 0;
+    y = (vh - h) / 2;
+  }
+
+  
+
+  const fitScale = w / design.w; // design px -> screen px
+  return { x, y, w, h, fitScale };
+}
+
+
+
+
+function applyUI(reason = "applyUI") {
+  const rect = getVideoRect();
+  const fit = rect.fitScale;
+
+  if (!Number.isFinite(fit) || fit <= 0) return;
+
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  // ui.x/ui.y are design fractions => convert to design pixels
+  const tx = ui.x * design.w;
+  const ty = ui.y * design.h;
+
+  // Fit stage into videoRect, then apply user scale around the design centre, then user translation.
+  stage.style.transform =
+    `translate(${rect.x}px, ${rect.y}px) ` +
+    `scale(${fit}) ` +
+    `translate(${cx}px, ${cy}px) ` +
+    `scale(${ui.scale}) ` +
+    `translate(${-cx}px, ${-cy}px) ` +
+    `translate(${tx}px, ${ty}px)`;
+}
+
+
+
+// suwak
+if (uiScale) {
+  uiScale.addEventListener("input", () => {
+    ui.scale = Number(uiScale.value);
+    applyUI("slider");
+  });
+}
+
+
+
+
+let dragging = false;
+let startX = 0, startY = 0, startUiX = 0, startUiY = 0;
+
+stageWrap.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".card")) return;
+
+  dragging = true;
+  stageWrap.classList.add("dragging");
+  stageWrap.setPointerCapture(e.pointerId);
+
+  startX = e.clientX;
+  startY = e.clientY;
+  startUiX = ui.x;
+  startUiY = ui.y;
+});
+
+stageWrap.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+
+  const rect = getVideoRect();
+  const totalScale = rect.fitScale * ui.scale; // design px -> screen px
+
+  if (!Number.isFinite(totalScale) || totalScale <= 0) return;
+
+  // Convert screen delta to design delta, then to design fractions
+  const dxDesign = (e.clientX - startX) / totalScale;
+  const dyDesign = (e.clientY - startY) / totalScale;
+
+  ui.x = startUiX + dxDesign / design.w;
+  ui.y = startUiY + dyDesign / design.h;
+
+  applyUI("drag");
+});
+
+function endDrag() {
+  dragging = false;
+  stageWrap.classList.remove("dragging");
+}
+
+stageWrap.addEventListener("pointerup", endDrag);
+stageWrap.addEventListener("pointercancel", endDrag);
+
+
+
+
+
+
+
+
+
+function computeSlots5() {
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  const radius = Math.min(design.w, design.h) * 0.36;
+  const anglesDeg = [-90, -18, 54, 126, 198];
+
+  return anglesDeg.map((a) => {
+    const rad = (a * Math.PI) / 180;
+    return {
+      x: cx + Math.cos(rad) * radius,
+      y: cy + Math.sin(rad) * radius,
+    };
+  });
+}
+
+function computeSlots6() {
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  const radius = Math.min(design.w, design.h) * 0.36;
+  const anglesDeg = [-90, -30, 30, 90, 150, 210];
+
+  return anglesDeg.map((a) => {
+    const rad = (a * Math.PI) / 180;
+    return {
+      x: cx + Math.cos(rad) * radius,
+      y: cy + Math.sin(rad) * radius,
+    };
+  });
+}
+
+
+function computeSlots7() {
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  const radius = Math.min(design.w, design.h) * 0.36;
+
+  const anglesDeg = [
+    -90,
+    -38.57,
+    12.86,
+    64.29,
+    115.71,
+    167.14,
+    218.57
+  ];
+
+  return anglesDeg.map((a) => {
+    const rad = (a * Math.PI) / 180;
+    return {
+      x: cx + Math.cos(rad) * radius,
+      y: cy + Math.sin(rad) * radius,
+    };
+  });
+}
+
+function computeSlots8() {
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  const radius = Math.min(design.w, design.h) * 0.36;
+
+  const anglesDeg = [
+    -90,
+    -45,
+    0,
+    45,
+    90,
+    135,
+    180,
+    225
+  ];
+
+  return anglesDeg.map((a) => {
+    const rad = (a * Math.PI) / 180;
+    return {
+      x: cx + Math.cos(rad) * radius,
+      y: cy + Math.sin(rad) * radius,
+    };
+  });
+}
+
+
+function computeSlots9() {
+  const cx = design.w / 2;
+  const cy = design.h / 2;
+
+  const radius = Math.min(design.w, design.h) * 0.36;
+
+  const anglesDeg = [
+    -90,
+    -50,
+    -10,
+    30,
+    70,
+    110,
+    150,
+    190,
+    230
+  ];
+
+  return anglesDeg.map((a) => {
+    const rad = (a * Math.PI) / 180;
+    return {
+      x: cx + Math.cos(rad) * radius,
+      y: cy + Math.sin(rad) * radius,
+    };
+  });
+}
+
+
+
+
+
+
+function computeSlotsByCount(count) {
+  if (count === 5) return computeSlots5();
+  if (count === 6) return computeSlots6();
+  if (count === 7) return computeSlots7();
+  if (count === 8) return computeSlots8();
+  if (count === 9) return computeSlots9();
+
+  console.warn("Brak layoutu dla:", count, "używam layoutu 9");
+return computeSlots9();
+}
+
+
+async function fetchGameState() {
+
+  if (!streamId) return;
+
+  let res;
+  try {
+    res = await fetch(`/results?streamId=${encodeURIComponent(streamId)}`, {
+  cache: "no-store"
+    });
+  } catch {
+    return;
+  }
+
+  if (!res.ok) return;
+
+  const data = await res.json();
+
+  console.log("RESULTS:", data);
+
+  // 🔥 zmiana rundy
+  if (currentRoundId !== data.roundId) {
+
+    currentRoundId = data.roundId;
+
+    // liczba kart z backendu
+    if (Number.isInteger(data.maxCards)) {
+  ilosc_kart = Math.min(data.maxCards, 9);
+}
+
+    console.log("NEW ROUND", currentRoundId,
+                "cards:", ilosc_kart);
+
+    showCards();
+  }
+}
+
+function startPolling() {
+  if (pollingStarted) return;
+  if (!streamId) return;   // ⭐ NOWE
+
+  pollingStarted = true;
+
+  setInterval(fetchGameState, 1000);
+}
+
+
+
+let rafPending = false;
+function scheduleApplyUI(reason, extra) {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    applyUI(reason);
+    // optional debug logging here
+  });
+}
+
+window.addEventListener("resize", () => scheduleApplyUI("resize"));
+document.addEventListener("fullscreenchange", () => scheduleApplyUI("fullscreenchange"));
+
+if (window.Twitch?.ext?.onContext) {
+  window.Twitch.ext.onContext((context, changed) => {
+    lastContext = context;
+
+    // Update design from broadcast resolution if present
+    const vr = parseResolution(context.videoResolution);
+    if (vr && (vr.w !== design.w || vr.h !== design.h)) {
+      setDesign(vr.w, vr.h);
+      showCards(); // because slot positions are in design pixels
+    }
+
+    // Most relevant changes: displayResolution, isFullScreen, isTheatreMode
+    scheduleApplyUI("onContext", { changed, context });
+  });
+}
+
+
+// start
+setDesign(design.w, design.h);
+applyUI("startup");
+showCards();
+
+
+
+window.addEventListener("resize", applyUI);
+
+
+
+//logi
+
+const DEBUG = true;
+
+function logMetrics(tag, extra) {
+  if (!DEBUG) return;
+
+  const rect = getVideoRect();
+
+  console.log(`[overlay:${tag}]`,
+    {
+      inner: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+      design,
+      videoRect: rect,
+      ui,
+      stageTransform: stage.style.transform,
+      context: lastContext ? {
+        isFullScreen: lastContext.isFullScreen,
+        isTheatreMode: lastContext.isTheatreMode,
+        displayResolution: lastContext.displayResolution,
+        videoResolution: lastContext.videoResolution,
+      } : null,
+      extra
+    }
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+function addCard(label, x, y, cardId) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.textContent = label;
+  el.style.left = x + "px";
+  el.style.top  = y + "px";
+
+  el.addEventListener("click", () => {
+    console.log("CARD CLICKED", cardId);
+    sendVote(cardId);
+  });
+
+  stage.appendChild(el);
+}
+
+
+function showCards() {
+
+  stage.innerHTML = "";
+
+  const slots = computeSlotsByCount(ilosc_kart);
+
+  for (let i = 0; i < ilosc_kart; i++) {
+
+  // przesunięcie indeksów o 1 w lewo
+  const slotIndex = (i + 1) % slots.length;
+
+const slot = slots[slotIndex];
+if (!slot) continue;
+
+addCard(
+  "#" + (i + 1),
+  slot.x,
+  slot.y,
+  i + 1
+);
+}
+}
+
+
+
+   
+
+   
+
+
+  </script>
+
+  <script>
+  setTimeout(() => {
+  if (isAuthorized) return;
+
+  streamId = "local_test";
+  userId = getUserId();
+
+  const el = document.createElement("div");
+  el.style.cssText =
+    "position:fixed;top:60px;left:10px;z-index:9999;background:#222;color:#fff;padding:8px;border-radius:6px;font-family:Arial";
+
+  el.textContent =
+    "Brak onAuthorized (poza Twitchem to normalne). Pokazuję tryb LOCAL.";
+
+  document.body.appendChild(el);
+
+  showCards();
+  startPolling();
+}, 1000);
+
+if (window.Twitch && window.Twitch.ext && window.Twitch.ext.onAuthorized) {
+  window.Twitch.ext.onAuthorized((auth) => {
+    isAuthorized = true;
+
+    streamId = String(auth.channelId || "").trim();
+    userId = String(auth.userId || "").trim();
+
+    console.log("AUTHORIZED");
+    console.log("STREAM ID =", streamId);
+    console.log("USER ID =", userId);
+
+    showCards();
+    startPolling();
+  });
+}
+
+
+
+
+
+
+    function setStatus(msg) {
+  const el = document.getElementById("status");
+  if (!el) return;
+  el.textContent = msg;
+}
+
+function getUserId() {
+  if (userId) return userId;
+
+  let id = localStorage.getItem("demo_uid");
+  if (!id) {
+    id = "demo_" + Math.random().toString(36).slice(2);
+    localStorage.setItem("demo_uid", id);
+  }
+  return id;
+}
+
+async function sendVote(cardId) {
+  if (!streamId) {
+    setStatus("No streamId.");
+    return;
+  }
+
+  const uid = getUserId();
+
+  let res;
+  try {
+    res = await fetch("/vote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        streamId: streamId,
+        cardId: cardId,
+        userId: uid
+      }),
+    });
+  } catch (e) {
+    console.error("Vote request failed:", e);
+    setStatus("Vote failed (network error).");
+    return;
+  }
+
+  if (res.ok) {
+    setStatus("Voted!");
+    return;
+  }
+
+  if (res.status === 409) {
+    setStatus("You already voted this round.");
+    return;
+  }
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {}
+
+  console.error("Vote error:", res.status, data);
+  setStatus("Vote failed.");
+}
+
+
+
+
+  </script>
+
+
+
+
+
+
+
+<div id="status"></div>
+
+<style>
+  #status{
+    position: fixed;
+    left: 24px;
+    bottom: 24px;
+    z-index: 999999;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font: 700 18px Arial, sans-serif;
+    color: #fff;
+    background: rgba(0,0,0,0.55);
+    pointer-events: none;
+    user-select: none;
+    white-space: nowrap;
+  }
+</style>
+
+
+
+
+</body>
+</html>
