@@ -2,19 +2,15 @@
   "name": "extension",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "https-server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node https-server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "devcert": "^1.2.2",
     "express": "^5.2.1"
-  },
-  "devDependencies": {
-    "openssl": "^2.0.0"
   }
 }
