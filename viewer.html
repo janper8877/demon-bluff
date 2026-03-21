@@ -43,6 +43,9 @@
   pointer-events: auto;
   cursor: pointer;
   user-select: none;
+
+  background: red !important;
+  border: 3px solid yellow !important;
 }
 
 
@@ -88,6 +91,36 @@
 <input id="uiScale" type="range" min="0.5" max="1.5" step="0.01" value="1" />
 
   <script>
+
+
+// 🔥 FAKE TWITCH (LOCAL TEST MODE)
+if (!window.Twitch) {
+  console.log("FAKE TWITCH MODE");
+
+  window.Twitch = {
+    ext: {
+      onAuthorized: (cb) => {
+        setTimeout(() => {
+          cb({
+            channelId: "local_channel",
+            userId: "local_user"
+          });
+        }, 100);
+      },
+
+      onContext: (cb) => {
+        setTimeout(() => {
+          cb({
+            videoResolution: "1920x1080",
+            displayResolution: "1920x1080",
+            isFullScreen: false,
+            isTheatreMode: false
+          }, []);
+        }, 200);
+      }
+    }
+  };
+}
 
    let ilosc_kart = 9;
 
@@ -186,6 +219,9 @@ function applyUI(reason = "applyUI") {
     `scale(${ui.scale}) ` +
     `translate(${-cx}px, ${-cy}px) ` +
     `translate(${tx}px, ${ty}px)`;
+
+    console.log("TRANSFORM:", stage.style.transform);
+console.log("VIDEO RECT:", getVideoRect());
 }
 
 
@@ -559,24 +595,7 @@ addCard(
   </script>
 
   <script>
-  setTimeout(() => {
-  if (isAuthorized) return;
 
-  streamId = "local_test";
-  userId = getUserId();
-
-  const el = document.createElement("div");
-  el.style.cssText =
-    "position:fixed;top:60px;left:10px;z-index:9999;background:#222;color:#fff;padding:8px;border-radius:6px;font-family:Arial";
-
-  el.textContent =
-    "Brak onAuthorized (poza Twitchem to normalne). Pokazuję tryb LOCAL.";
-
-  document.body.appendChild(el);
-
-  showCards();
-  startPolling();
-}, 1000);
 
 if (window.Twitch && window.Twitch.ext && window.Twitch.ext.onAuthorized) {
   window.Twitch.ext.onAuthorized((auth) => {
