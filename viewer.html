@@ -96,6 +96,7 @@
   let streamId = null;
   let userId = null;
   let isAuthorized = false;
+  let firstContextReceived = false;
 
     // Na start: tylko pokazujemy 5 kart "na sztywno", żeby sprawdzić czy overlay w ogóle działa
     const stage = document.getElementById("stage");
@@ -442,16 +443,20 @@ document.addEventListener("fullscreenchange", () => scheduleApplyUI("fullscreenc
 
 if (window.Twitch?.ext?.onContext) {
   window.Twitch.ext.onContext((context, changed) => {
+    console.log("CONTEXT RECEIVED", context);
+
     lastContext = context;
 
-    // Update design from broadcast resolution if present
     const vr = parseResolution(context.videoResolution);
     if (vr && (vr.w !== design.w || vr.h !== design.h)) {
       setDesign(vr.w, vr.h);
-      showCards(); // because slot positions are in design pixels
     }
 
-    // Most relevant changes: displayResolution, isFullScreen, isTheatreMode
+    if (!firstContextReceived) {
+      firstContextReceived = true;
+      showCards();
+    }
+
     scheduleApplyUI("onContext", { changed, context });
   });
 }
@@ -460,7 +465,7 @@ if (window.Twitch?.ext?.onContext) {
 // start
 setDesign(design.w, design.h);
 applyUI("startup");
-showCards();
+
 
 
 
@@ -584,7 +589,6 @@ if (window.Twitch && window.Twitch.ext && window.Twitch.ext.onAuthorized) {
     console.log("STREAM ID =", streamId);
     console.log("USER ID =", userId);
 
-    showCards();
     startPolling();
   });
 }
