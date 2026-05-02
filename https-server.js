@@ -15,6 +15,12 @@ const ALLOWED_ORIGINS = new Set([
   "https://twitch.tv",
 ]);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  return /^https:\/\/[a-z0-9-]+\.ext-twitch\.tv$/i.test(origin);
+}
+
 app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.url, "origin=", req.headers.origin || "-");
   next();
@@ -23,13 +29,12 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // CORS (dla requestów robionych przez supervisor.js)
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
+  // CORS dla Twitch Extension iframe i lokalnych testow.
+  if (isAllowedOrigin(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
   } else {
-    // fallback (np. gdy testujesz ręcznie)
+    // Fallback np. dla recznego sprawdzania JSON-a w przegladarce.
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
