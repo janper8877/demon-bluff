@@ -60,8 +60,9 @@ streams = {
   "streamer1": {
       roundId: 3,
       maxCards: 7,
+      maxVotesPerUser: 2,
       votes: [0,0,0,0,0,0,0],
-      userLastVotedRound: {}
+      userVotesByRound: {}
   }
 }
 */
@@ -72,11 +73,18 @@ function getStream(streamId) {
     streams[streamId] = {
       roundId: 1,
       maxCards: 10,
+      maxVotesPerUser: 1,
       votes: Array(10).fill(0),
-      userLastVotedRound: Object.create(null),
+      userVotesByRound: Object.create(null),
     };
   }
   return streams[streamId];
+}
+
+function clampInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isInteger(n)) return fallback;
+  return Math.max(min, Math.min(n, max));
 }
 
 
@@ -87,6 +95,7 @@ function getStream(streamId) {
 app.post("/startRound", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
   const cardCount = Number(req.body.cardCount);
+  const maxVotesPerUser = clampInt(req.body.maxVotesPerUser, 1, 1, 4);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -100,14 +109,16 @@ app.post("/startRound", (req, res) => {
 
   stream.roundId++;
   stream.maxCards = cardCount;
+  stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
-  stream.userLastVotedRound = Object.create(null);
+  stream.userVotesByRound = Object.create(null);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
-    maxCards: stream.maxCards
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser
   });
 });
 
@@ -139,18 +150,35 @@ app.post("/vote", (req, res) => {
     });
   }
 
-  if (stream.userLastVotedRound[userId] === stream.roundId) {
-    return res.status(409).json({ ok: false, error: "ALREADY_VOTED" });
+  const roundKey = String(stream.roundId);
+  if (!stream.userVotesByRound[roundKey]) {
+    stream.userVotesByRound[roundKey] = Object.create(null);
+  }
+
+  const userVotes = stream.userVotesByRound[roundKey][userId] || [];
+
+  if (userVotes.includes(cardId)) {
+    return res.status(409).json({ ok: false, error: "ALREADY_VOTED_CARD" });
+  }
+
+  if (userVotes.length >= stream.maxVotesPerUser) {
+    return res.status(409).json({
+      ok: false,
+      error: "VOTE_LIMIT_REACHED",
+      maxVotesPerUser: stream.maxVotesPerUser
+    });
   }
 
   stream.votes[cardId - 1]++;
-  stream.userLastVotedRound[userId] = stream.roundId;
+  stream.userVotesByRound[roundKey][userId] = userVotes.concat(cardId);
 
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
-    cardId
+    cardId,
+    votesUsed: userVotes.length + 1,
+    maxVotesPerUser: stream.maxVotesPerUser
   });
 });
 
@@ -175,6 +203,7 @@ app.get("/results", (req, res) => {
     ok:true,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser,
     votes: votesObj
   });
 });
@@ -189,6 +218,7 @@ app.get("/__whoami", (req, res) => {
 app.get("/startRound", (req, res) => {
   const streamId = String(req.query.streamId || "").trim();
   const cardCount = Number(req.query.cardCount);
+  const maxVotesPerUser = clampInt(req.query.maxVotesPerUser, 1, 1, 4);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -202,8 +232,9 @@ app.get("/startRound", (req, res) => {
 
   stream.roundId++;
   stream.maxCards = cardCount;
+  stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
-  stream.userLastVotedRound = Object.create(null);
+  stream.userVotesByRound = Object.create(null);
 
   console.log("ROUND STARTED FOR:", streamId);
 
@@ -211,7 +242,8 @@ app.get("/startRound", (req, res) => {
     ok: true,
     streamId,
     roundId: stream.roundId,
-    maxCards: stream.maxCards
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser
   });
 });
 
