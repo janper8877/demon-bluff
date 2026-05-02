@@ -76,6 +76,9 @@ function getStream(streamId) {
       maxVotesPerUser: 1,
       votes: Array(10).fill(0),
       userVotesByRound: Object.create(null),
+      players: Object.create(null),
+      leaderboard: Object.create(null),
+      scoredRounds: Object.create(null),
     };
   }
   return streams[streamId];
@@ -85,6 +88,30 @@ function clampInt(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isInteger(n)) return fallback;
   return Math.max(min, Math.min(n, max));
+}
+
+function cleanDisplayName(value, fallback) {
+  const name = String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 24);
+
+  return name || fallback;
+}
+
+function buildLeaderboard(stream) {
+  return Object.entries(stream.leaderboard)
+    .map(([userId, row]) => ({
+      userId,
+      displayName: stream.players[userId] || row.displayName || userId,
+      score: row.score || 0,
+      correctAnswers: row.correctAnswers || 0
+    }))
+    .sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
+    .map((row, index) => ({
+      rank: index + 1,
+      ...row
+    }));
 }
 
 
@@ -128,6 +155,7 @@ app.post("/vote", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
   const cardId = Number(req.body.cardId);
   const userId = String(req.body.userId || "").trim();
+  const displayName = cleanDisplayName(req.body.displayName, userId);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -138,6 +166,7 @@ app.post("/vote", (req, res) => {
   }
 
   const stream = getStream(streamId);
+  stream.players[userId] = displayName;
 
   if (
     !Number.isInteger(cardId) ||
@@ -177,8 +206,119 @@ app.post("/vote", (req, res) => {
     streamId,
     roundId: stream.roundId,
     cardId,
+    displayName,
     votesUsed: userVotes.length + 1,
     maxVotesPerUser: stream.maxVotesPerUser
+  });
+});
+
+app.post("/scoreRound", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const correctCardId = Number(req.body.correctCardId);
+  const points = clampInt(req.body.points, 1, 1, 1000);
+  const force = req.body.force === true;
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+
+  if (
+    !Number.isInteger(correctCardId) ||
+    correctCardId < 1 ||
+    correctCardId > stream.maxCards
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid correctCardId (1-${stream.maxCards})`
+    });
+  }
+
+  const roundKey = String(stream.roundId);
+  if (stream.scoredRounds[roundKey] && !force) {
+    return res.status(409).json({
+      ok: false,
+      error: "ROUND_ALREADY_SCORED",
+      roundId: stream.roundId,
+      leaderboard: buildLeaderboard(stream)
+    });
+  }
+
+  const roundVotes = stream.userVotesByRound[roundKey] || Object.create(null);
+  const winners = [];
+
+  for (const [userId, votedCards] of Object.entries(roundVotes)) {
+    if (!Array.isArray(votedCards) || !votedCards.includes(correctCardId)) continue;
+
+    if (!stream.leaderboard[userId]) {
+      stream.leaderboard[userId] = {
+        displayName: stream.players[userId] || userId,
+        score: 0,
+        correctAnswers: 0
+      };
+    }
+
+    stream.leaderboard[userId].displayName = stream.players[userId] || stream.leaderboard[userId].displayName || userId;
+    stream.leaderboard[userId].score += points;
+    stream.leaderboard[userId].correctAnswers++;
+
+    winners.push({
+      userId,
+      displayName: stream.players[userId] || userId
+    });
+  }
+
+  stream.scoredRounds[roundKey] = {
+    correctCardId,
+    points,
+    scoredAt: new Date().toISOString(),
+    winners: winners.length
+  };
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    correctCardId,
+    points,
+    winners,
+    leaderboard: buildLeaderboard(stream)
+  });
+});
+
+app.get("/leaderboard", (req, res) => {
+  const streamId = String(req.query.streamId || "").trim();
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    leaderboard: buildLeaderboard(stream)
+  });
+});
+
+app.post("/resetLeaderboard", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+  stream.leaderboard = Object.create(null);
+  stream.scoredRounds = Object.create(null);
+
+  res.json({
+    ok: true,
+    streamId,
+    leaderboard: []
   });
 });
 
