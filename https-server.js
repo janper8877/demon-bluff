@@ -306,6 +306,7 @@ app.get("/leaderboard", (req, res) => {
 
 app.post("/resetLeaderboard", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
+  const clearCurrentRoundVotes = req.body.clearCurrentRoundVotes !== false;
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -315,9 +316,16 @@ app.post("/resetLeaderboard", (req, res) => {
   stream.leaderboard = Object.create(null);
   stream.scoredRounds = Object.create(null);
 
+  if (clearCurrentRoundVotes) {
+    stream.votes = Array(stream.maxCards).fill(0);
+    stream.userVotesByRound[String(stream.roundId)] = Object.create(null);
+  }
+
   res.json({
     ok: true,
     streamId,
+    roundId: stream.roundId,
+    clearedCurrentRoundVotes: clearCurrentRoundVotes,
     leaderboard: []
   });
 });
