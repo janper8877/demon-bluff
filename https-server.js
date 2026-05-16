@@ -62,6 +62,7 @@ streams = {
       maxCards: 7,
       maxVotesPerUser: 2,
       votes: [0,0,0,0,0,0,0],
+      deadCards: [],
       userVotesByRound: {}
   }
 }
@@ -75,6 +76,7 @@ function getStream(streamId) {
       maxCards: 10,
       maxVotesPerUser: 1,
       votes: Array(10).fill(0),
+      deadCards: [],
       userVotesByRound: Object.create(null),
       players: Object.create(null),
       leaderboard: Object.create(null),
@@ -138,6 +140,7 @@ app.post("/startRound", (req, res) => {
   stream.maxCards = cardCount;
   stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
+  stream.deadCards = [];
   stream.userVotesByRound = Object.create(null);
 
   res.json({
@@ -145,7 +148,8 @@ app.post("/startRound", (req, res) => {
     streamId,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
-    maxVotesPerUser: stream.maxVotesPerUser
+    maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards
   });
 });
 
@@ -176,6 +180,15 @@ app.post("/vote", (req, res) => {
     return res.status(400).json({
       ok: false,
       error: `Invalid cardId (1-${stream.maxCards})`
+    });
+  }
+
+  if (stream.deadCards.includes(cardId)) {
+    return res.status(409).json({
+      ok: false,
+      error: "CARD_DEAD",
+      cardId,
+      deadCards: stream.deadCards
     });
   }
 
@@ -330,6 +343,41 @@ app.post("/resetLeaderboard", (req, res) => {
   });
 });
 
+app.post("/deadCard", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const cardId = Number(req.body.cardId);
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+
+  if (
+    !Number.isInteger(cardId) ||
+    cardId < 1 ||
+    cardId > stream.maxCards
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid cardId (1-${stream.maxCards})`
+    });
+  }
+
+  if (!stream.deadCards.includes(cardId)) {
+    stream.deadCards.push(cardId);
+    stream.deadCards.sort((a, b) => a - b);
+  }
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    cardId,
+    deadCards: stream.deadCards
+  });
+});
+
 
 
 // Unity będzie to odpytywać
@@ -352,6 +400,7 @@ app.get("/results", (req, res) => {
     roundId: stream.roundId,
     maxCards: stream.maxCards,
     maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards,
     votes: votesObj
   });
 });
@@ -382,6 +431,7 @@ app.get("/startRound", (req, res) => {
   stream.maxCards = cardCount;
   stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
+  stream.deadCards = [];
   stream.userVotesByRound = Object.create(null);
 
   console.log("ROUND STARTED FOR:", streamId);
@@ -391,7 +441,8 @@ app.get("/startRound", (req, res) => {
     streamId,
     roundId: stream.roundId,
     maxCards: stream.maxCards,
-    maxVotesPerUser: stream.maxVotesPerUser
+    maxVotesPerUser: stream.maxVotesPerUser,
+    deadCards: stream.deadCards
   });
 });
 
