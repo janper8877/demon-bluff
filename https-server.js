@@ -225,6 +225,93 @@ app.post("/vote", (req, res) => {
   });
 });
 
+app.post("/voteBatch", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const userId = String(req.body.userId || "").trim();
+  const displayName = cleanDisplayName(req.body.displayName, userId);
+  const cardIds = Array.isArray(req.body.cardIds)
+    ? req.body.cardIds.map(Number)
+    : [];
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  if (!userId) {
+    return res.status(400).json({ ok: false, error: "Missing userId" });
+  }
+
+  const stream = getStream(streamId);
+  stream.players[userId] = displayName;
+
+  const uniqueCardIds = [...new Set(cardIds)];
+
+  if (uniqueCardIds.length !== cardIds.length) {
+    return res.status(400).json({ ok: false, error: "DUPLICATE_CARD_IDS" });
+  }
+
+  if (uniqueCardIds.length < 1 || uniqueCardIds.length > stream.maxVotesPerUser) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_VOTE_COUNT",
+      maxVotesPerUser: stream.maxVotesPerUser
+    });
+  }
+
+  for (const cardId of uniqueCardIds) {
+    if (
+      !Number.isInteger(cardId) ||
+      cardId < 1 ||
+      cardId > stream.maxCards
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid cardId (1-${stream.maxCards})`
+      });
+    }
+
+    if (stream.deadCards.includes(cardId)) {
+      return res.status(409).json({
+        ok: false,
+        error: "CARD_DEAD",
+        cardId,
+        deadCards: stream.deadCards
+      });
+    }
+  }
+
+  const roundKey = String(stream.roundId);
+  if (!stream.userVotesByRound[roundKey]) {
+    stream.userVotesByRound[roundKey] = Object.create(null);
+  }
+
+  const userVotes = stream.userVotesByRound[roundKey][userId] || [];
+  if (userVotes.length > 0) {
+    return res.status(409).json({
+      ok: false,
+      error: "ALREADY_SUBMITTED",
+      votesUsed: userVotes.length,
+      maxVotesPerUser: stream.maxVotesPerUser
+    });
+  }
+
+  for (const cardId of uniqueCardIds) {
+    stream.votes[cardId - 1]++;
+  }
+
+  stream.userVotesByRound[roundKey][userId] = uniqueCardIds;
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    cardIds: uniqueCardIds,
+    displayName,
+    votesUsed: uniqueCardIds.length,
+    maxVotesPerUser: stream.maxVotesPerUser
+  });
+});
+
 app.post("/scoreRound", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
   const correctCardId = Number(req.body.correctCardId);
