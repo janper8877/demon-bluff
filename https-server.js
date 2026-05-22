@@ -387,6 +387,106 @@ app.post("/scoreRound", (req, res) => {
   });
 });
 
+app.post("/scoreRoundBatch", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+  const correctCardIds = Array.isArray(req.body.correctCardIds)
+    ? req.body.correctCardIds.map(Number)
+    : [];
+  const points = clampInt(req.body.points, 1, 1, 1000);
+  const force = req.body.force === true;
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+  const uniqueCorrectCardIds = [...new Set(correctCardIds)].sort((a, b) => a - b);
+
+  if (uniqueCorrectCardIds.length !== correctCardIds.length) {
+    return res.status(400).json({ ok: false, error: "DUPLICATE_CORRECT_CARD_IDS" });
+  }
+
+  if (uniqueCorrectCardIds.length < 1 || uniqueCorrectCardIds.length > stream.maxVotesPerUser) {
+    return res.status(400).json({
+      ok: false,
+      error: "INVALID_CORRECT_CARD_COUNT",
+      maxVotesPerUser: stream.maxVotesPerUser
+    });
+  }
+
+  for (const cardId of uniqueCorrectCardIds) {
+    if (
+      !Number.isInteger(cardId) ||
+      cardId < 1 ||
+      cardId > stream.maxCards
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid correctCardId (1-${stream.maxCards})`
+      });
+    }
+  }
+
+  const roundKey = String(stream.roundId);
+  if (stream.scoredRounds[roundKey] && !force) {
+    return res.status(409).json({
+      ok: false,
+      error: "ROUND_ALREADY_SCORED",
+      roundId: stream.roundId,
+      leaderboard: buildLeaderboard(stream)
+    });
+  }
+
+  const roundVotes = stream.userVotesByRound[roundKey] || Object.create(null);
+  const winners = [];
+
+  for (const [userId, votedCards] of Object.entries(roundVotes)) {
+    if (!Array.isArray(votedCards)) continue;
+
+    const sortedVotedCards = [...new Set(votedCards.map(Number))].sort((a, b) => a - b);
+    const exactMatch =
+      sortedVotedCards.length === uniqueCorrectCardIds.length &&
+      sortedVotedCards.every((cardId, index) => cardId === uniqueCorrectCardIds[index]);
+
+    if (!exactMatch) continue;
+
+    if (!stream.leaderboard[userId]) {
+      stream.leaderboard[userId] = {
+        displayName: stream.players[userId] || userId,
+        score: 0,
+        correctAnswers: 0
+      };
+    }
+
+    stream.leaderboard[userId].displayName = stream.players[userId] || stream.leaderboard[userId].displayName || userId;
+    stream.leaderboard[userId].score += points;
+    stream.leaderboard[userId].correctAnswers++;
+
+    winners.push({
+      userId,
+      displayName: stream.players[userId] || userId,
+      votedCards: sortedVotedCards
+    });
+  }
+
+  stream.scoredRounds[roundKey] = {
+    correctCardIds: uniqueCorrectCardIds,
+    points,
+    scoredAt: new Date().toISOString(),
+    winners: winners.length
+  };
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    correctCardIds: uniqueCorrectCardIds,
+    points,
+    winners,
+    leaderboard: buildLeaderboard(stream)
+  });
+});
+
 app.get("/leaderboard", (req, res) => {
   const streamId = String(req.query.streamId || "").trim();
 
