@@ -3,8 +3,10 @@
 
 
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
+app.set("trust proxy", true);
 
 app.use(express.json({ limit: "2kb" }));
 
@@ -54,6 +56,8 @@ app.use((req, res, next) => {
 
 // streamId -> state
 const streams = Object.create(null);
+// sessionId -> Twitch connection status
+const connectSessions = Object.create(null);
 
 /*
 streams = {
@@ -116,10 +120,204 @@ function buildLeaderboard(stream) {
     }));
 }
 
+function getPublicBaseUrl(req) {
+  return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`)
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function getTwitchRedirectUri(req) {
+  return String(process.env.TWITCH_REDIRECT_URI || `${getPublicBaseUrl(req)}/connect/callback`).trim();
+}
+
+function pruneConnectSessions() {
+  const now = Date.now();
+  const maxAgeMs = 15 * 60 * 1000;
+
+  for (const [sessionId, session] of Object.entries(connectSessions)) {
+    if (!session || now - (session.createdAt || 0) > maxAgeMs) {
+      delete connectSessions[sessionId];
+    }
+  }
+}
+
+function getTwitchOAuthConfig(req) {
+  return {
+    clientId: String(process.env.TWITCH_CLIENT_ID || "").trim(),
+    clientSecret: String(process.env.TWITCH_CLIENT_SECRET || "").trim(),
+    redirectUri: getTwitchRedirectUri(req)
+  };
+}
+
+async function exchangeTwitchCode(req, code) {
+  const { clientId, clientSecret, redirectUri } = getTwitchOAuthConfig(req);
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    grant_type: "authorization_code",
+    redirect_uri: redirectUri
+  });
+
+  const tokenRes = await fetch("https://id.twitch.tv/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  });
+
+  const tokenData = await tokenRes.json().catch(() => ({}));
+  if (!tokenRes.ok || !tokenData.access_token) {
+    throw new Error(`Twitch token exchange failed: ${tokenRes.status} ${JSON.stringify(tokenData)}`);
+  }
+
+  const userRes = await fetch("https://api.twitch.tv/helix/users", {
+    headers: {
+      "Authorization": `Bearer ${tokenData.access_token}`,
+      "Client-Id": clientId
+    }
+  });
+
+  const userData = await userRes.json().catch(() => ({}));
+  if (!userRes.ok || !userData.data || !userData.data[0]) {
+    throw new Error(`Twitch user lookup failed: ${userRes.status} ${JSON.stringify(userData)}`);
+  }
+
+  return userData.data[0];
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sendConnectHtml(res, title, message) {
+  res.type("html").send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#111;color:#fff;font:700 20px Arial,sans-serif;text-align:center}
+    div{max-width:520px;padding:28px}
+    small{display:block;margin-top:12px;color:#aaa;font-size:13px}
+  </style>
+</head>
+<body><div>${escapeHtml(message)}<small>You can close this tab and return to Unity.</small></div></body>
+</html>`);
+}
+
 
 
 
 // ====== Round control ======
+
+app.get("/connect/start", (req, res) => {
+  pruneConnectSessions();
+
+  const sessionId = String(req.query.session || "").trim();
+  const { clientId, clientSecret, redirectUri } = getTwitchOAuthConfig(req);
+
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: "Missing session" });
+  }
+
+  if (!clientId || !clientSecret) {
+    return res.status(500).json({
+      ok: false,
+      error: "Missing TWITCH_CLIENT_ID or TWITCH_CLIENT_SECRET on server"
+    });
+  }
+
+  const state = crypto.randomBytes(16).toString("hex");
+  connectSessions[sessionId] = {
+    status: "pending",
+    state,
+    createdAt: Date.now()
+  };
+
+  const authorizeUrl = new URL("https://id.twitch.tv/oauth2/authorize");
+  authorizeUrl.searchParams.set("client_id", clientId);
+  authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("scope", "");
+  authorizeUrl.searchParams.set("state", `${sessionId}.${state}`);
+
+  res.redirect(authorizeUrl.toString());
+});
+
+app.get("/connect/callback", async (req, res) => {
+  pruneConnectSessions();
+
+  const code = String(req.query.code || "").trim();
+  const state = String(req.query.state || "").trim();
+  const [sessionId, stateSecret] = state.split(".");
+  const session = connectSessions[sessionId];
+
+  if (!code || !sessionId || !stateSecret || !session || session.state !== stateSecret) {
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
+  }
+
+  try {
+    const user = await exchangeTwitchCode(req, code);
+    const streamId = String(user.id || "").trim();
+
+    connectSessions[sessionId] = {
+      ...session,
+      status: "connected",
+      streamId,
+      login: user.login || "",
+      displayName: user.display_name || user.login || streamId,
+      connectedAt: Date.now()
+    };
+
+    getStream(streamId);
+
+    return sendConnectHtml(
+      res,
+      "Twitch connected",
+      `Connected Twitch channel: ${user.display_name || user.login || streamId}`
+    );
+  } catch (err) {
+    console.error("Twitch connect callback failed:", err);
+    connectSessions[sessionId] = {
+      ...session,
+      status: "error",
+      error: "TWITCH_CONNECT_FAILED",
+      errorAt: Date.now()
+    };
+
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
+  }
+});
+
+app.get("/connect/status", (req, res) => {
+  pruneConnectSessions();
+
+  const sessionId = String(req.query.session || "").trim();
+  const session = connectSessions[sessionId];
+
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: "Missing session" });
+  }
+
+  if (!session) {
+    return res.json({ ok: true, connected: false, status: "missing" });
+  }
+
+  res.json({
+    ok: true,
+    connected: session.status === "connected",
+    status: session.status,
+    streamId: session.streamId || "",
+    login: session.login || "",
+    displayName: session.displayName || "",
+    error: session.error || ""
+  });
+});
 
 app.post("/startRound", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
