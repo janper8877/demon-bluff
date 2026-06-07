@@ -790,6 +790,34 @@ app.get("/results", (req, res) => {
   });
 });
 
+app.get("/voteList", (req, res) => {
+  const streamId = String(req.query.streamId || "").trim();
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+  const roundKey = String(stream.roundId);
+  const roundVotes = stream.userVotesByRound[roundKey] || Object.create(null);
+
+  const votes = Object.entries(roundVotes)
+    .filter(([, cardIds]) => Array.isArray(cardIds))
+    .map(([userId, cardIds]) => ({
+      displayName: stream.players[userId] || userId,
+      cardIds: [...new Set(cardIds.map(Number))]
+        .filter((cardId) => Number.isInteger(cardId))
+        .sort((a, b) => a - b)
+    }));
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    votes
+  });
+});
+
 
 
 app.get("/__whoami", (req, res) => {
