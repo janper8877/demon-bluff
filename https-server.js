@@ -206,7 +206,7 @@ function sendConnectHtml(res, title, message) {
     small{display:block;margin-top:12px;color:#aaa;font-size:13px}
   </style>
 </head>
-<body><div>${escapeHtml(message)}<small>You can close this tab and return to Unity.</small></div></body>
+<body><div>${escapeHtml(message)}<small>You can close this tab and return to the game.</small></div></body>
 </html>`);
 }
 
@@ -258,7 +258,7 @@ app.get("/connect/callback", async (req, res) => {
   const session = connectSessions[sessionId];
 
   if (!code || !sessionId || !stateSecret || !session || session.state !== stateSecret) {
-    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from the game.");
   }
 
   try {
@@ -290,7 +290,7 @@ app.get("/connect/callback", async (req, res) => {
       errorAt: Date.now()
     };
 
-    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from the game.");
   }
 });
 
