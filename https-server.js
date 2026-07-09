@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const app = express();
 app.set("trust proxy", true);
 
-app.use(express.json({ limit: "2kb" }));
+app.use(express.json({ limit: "64kb" }));
 
 
 const ALLOWED_ORIGINS = new Set([
@@ -81,6 +81,8 @@ function getStream(streamId) {
       maxVotesPerUser: 1,
       votes: Array(10).fill(0),
       deadCards: [],
+      evilCount: 1,
+      cards: [],
       userVotesByRound: Object.create(null),
       players: Object.create(null),
       leaderboard: Object.create(null),
@@ -103,6 +105,29 @@ function cleanDisplayName(value, fallback) {
     .slice(0, 24);
 
   return name || fallback;
+}
+
+function cleanText(value, maxLength) {
+  return String(value || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function cleanCards(value, maxCards) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((card) => ({
+      id: clampInt(card && card.id, 0, 1, maxCards),
+      name: cleanText(card && card.name, 48),
+      description: cleanText(card && card.description, 700),
+      alignment: cleanText(card && card.alignment, 16),
+      type: cleanText(card && card.type, 16),
+    }))
+    .filter((card) => card.id >= 1 && card.id <= maxCards)
+    .sort((a, b) => a.id - b.id);
 }
 
 function buildLeaderboard(stream) {
@@ -206,7 +231,7 @@ function sendConnectHtml(res, title, message) {
     small{display:block;margin-top:12px;color:#aaa;font-size:13px}
   </style>
 </head>
-<body><div>${escapeHtml(message)}<small>You can close this tab and return to the game.</small></div></body>
+<body><div>${escapeHtml(message)}<small>You can close this tab and return to Unity.</small></div></body>
 </html>`);
 }
 
@@ -258,7 +283,7 @@ app.get("/connect/callback", async (req, res) => {
   const session = connectSessions[sessionId];
 
   if (!code || !sessionId || !stateSecret || !session || session.state !== stateSecret) {
-    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from the game.");
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
   }
 
   try {
@@ -290,7 +315,7 @@ app.get("/connect/callback", async (req, res) => {
       errorAt: Date.now()
     };
 
-    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from the game.");
+    return sendConnectHtml(res, "Twitch connect failed", "Twitch connect failed. Please try again from Unity.");
   }
 });
 
@@ -323,6 +348,7 @@ app.post("/startRound", (req, res) => {
   const streamId = String(req.body.streamId || "").trim();
   const cardCount = Number(req.body.cardCount);
   const maxVotesPerUser = clampInt(req.body.maxVotesPerUser, 1, 1, 4);
+  const evilCount = clampInt(req.body.evilCount, maxVotesPerUser, 0, 10);
 
   if (!streamId) {
     return res.status(400).json({ ok: false, error: "Missing streamId" });
@@ -339,6 +365,8 @@ app.post("/startRound", (req, res) => {
   stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
   stream.deadCards = [];
+  stream.evilCount = evilCount;
+  stream.cards = cleanCards(req.body.cards, cardCount);
   stream.userVotesByRound = Object.create(null);
 
   res.json({
@@ -347,7 +375,9 @@ app.post("/startRound", (req, res) => {
     roundId: stream.roundId,
     maxCards: stream.maxCards,
     maxVotesPerUser: stream.maxVotesPerUser,
-    deadCards: stream.deadCards
+    evilCount: stream.evilCount,
+    deadCards: stream.deadCards,
+    cards: stream.cards
   });
 });
 
@@ -785,8 +815,10 @@ app.get("/results", (req, res) => {
     roundId: stream.roundId,
     maxCards: stream.maxCards,
     maxVotesPerUser: stream.maxVotesPerUser,
+    evilCount: stream.evilCount,
     deadCards: stream.deadCards,
-    votes: votesObj
+    votes: votesObj,
+    cards: stream.cards
   });
 });
 
@@ -845,6 +877,8 @@ app.get("/startRound", (req, res) => {
   stream.maxVotesPerUser = maxVotesPerUser;
   stream.votes = Array(cardCount).fill(0);
   stream.deadCards = [];
+  stream.evilCount = maxVotesPerUser;
+  stream.cards = [];
   stream.userVotesByRound = Object.create(null);
 
   console.log("ROUND STARTED FOR:", streamId);
@@ -855,7 +889,9 @@ app.get("/startRound", (req, res) => {
     roundId: stream.roundId,
     maxCards: stream.maxCards,
     maxVotesPerUser: stream.maxVotesPerUser,
-    deadCards: stream.deadCards
+    evilCount: stream.evilCount,
+    deadCards: stream.deadCards,
+    cards: stream.cards
   });
 });
 
