@@ -784,18 +784,49 @@ app.post("/deadCard", (req, res) => {
     stream.deadCards.sort((a, b) => a - b);
   }
 
+  if (Array.isArray(req.body.cards)) {
+    stream.cards = cleanCards(req.body.cards, stream.maxCards);
+  }
+
+  if (Number.isInteger(Number(req.body.evilCount))) {
+    stream.evilCount = clampInt(req.body.evilCount, stream.evilCount, 0, 10);
+  }
+
   res.json({
     ok: true,
     streamId,
     roundId: stream.roundId,
     cardId,
-    deadCards: stream.deadCards
+    deadCards: stream.deadCards,
+    cards: stream.cards
   });
 });
 
 
 
 // Unity będzie to odpytywać
+app.post("/cards", (req, res) => {
+  const streamId = String(req.body.streamId || "").trim();
+
+  if (!streamId) {
+    return res.status(400).json({ ok: false, error: "Missing streamId" });
+  }
+
+  const stream = getStream(streamId);
+  stream.cards = cleanCards(req.body.cards, stream.maxCards);
+
+  if (Number.isInteger(Number(req.body.evilCount))) {
+    stream.evilCount = clampInt(req.body.evilCount, stream.evilCount, 0, 10);
+  }
+
+  res.json({
+    ok: true,
+    streamId,
+    roundId: stream.roundId,
+    cards: stream.cards
+  });
+});
+
 app.get("/results", (req, res) => {
 
   const streamId = String(req.query.streamId || "").trim();
