@@ -23,10 +23,16 @@ function isAllowedOrigin(origin) {
   return /^https:\/\/[a-z0-9-]+\.ext-twitch\.tv$/i.test(origin);
 }
 
-app.use((req, res, next) => {
-  console.log(new Date().toISOString(), req.method, req.url, "origin=", req.headers.origin || "-");
-  next();
-});
+const LOG_HTTP_REQUESTS = /^(1|true|yes)$/i.test(
+  String(process.env.HTTP_LOG_REQUESTS || "")
+);
+
+if (LOG_HTTP_REQUESTS) {
+  app.use((req, res, next) => {
+    console.log(new Date().toISOString(), req.method, req.url, "origin=", req.headers.origin || "-");
+    next();
+  });
+}
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -59,6 +65,18 @@ const streams = Object.create(null);
 // sessionId -> Twitch connection status
 const connectSessions = Object.create(null);
 
+const EXTENSION_CLIENT_ID = String(
+  process.env.TWITCH_EXTENSION_CLIENT_ID || ""
+).trim();
+const EXTENSION_OWNER_ID = String(
+  process.env.TWITCH_EXTENSION_OWNER_ID || ""
+).trim();
+const EXTENSION_SECRET = String(
+  process.env.TWITCH_EXTENSION_SECRET || ""
+).trim();
+const PUBSUB_MIN_INTERVAL_MS = 1100;
+const pubSubBroadcasts = new Map();
+
 /*
 streams = {
   "streamer1": {
@@ -90,6 +108,155 @@ function getStream(streamId) {
     };
   }
   return streams[streamId];
+}
+
+function isExtensionPubSubConfigured() {
+  return Boolean(
+    EXTENSION_CLIENT_ID && EXTENSION_OWNER_ID && EXTENSION_SECRET
+  );
+}
+
+function buildVotesObject(stream) {
+  const votes = {};
+  for (let i = 1; i <= stream.maxCards; i++) {
+    votes[i] = stream.votes[i - 1] || 0;
+  }
+  return votes;
+}
+
+function buildResultsState(stream) {
+  return {
+    ok: true,
+    roundId: stream.roundId,
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser,
+    evilCount: stream.evilCount,
+    deadCards: stream.deadCards,
+    votes: buildVotesObject(stream),
+    cards: stream.cards,
+    realtimeMode: isExtensionPubSubConfigured() ? "twitch-pubsub" : "polling"
+  };
+}
+
+function buildPubSubState(stream) {
+  const state = {
+    roundId: stream.roundId,
+    maxCards: stream.maxCards,
+    maxVotesPerUser: stream.maxVotesPerUser,
+    evilCount: stream.evilCount,
+    deadCards: stream.deadCards,
+    cards: stream.cards
+  };
+
+  // Twitch limits Extension PubSub messages to 5 KB. Descriptions are the
+  // only potentially large field, so keep full text when possible and trim
+  // it only for the broadcast copy when necessary.
+  let message = JSON.stringify({ type: "state", state });
+  if (Buffer.byteLength(message, "utf8") <= 4800) return state;
+
+  state.cards = stream.cards.map((card) => ({
+    ...card,
+    description: String(card.description || "").slice(0, 220)
+  }));
+  message = JSON.stringify({ type: "state", state });
+  if (Buffer.byteLength(message, "utf8") <= 4800) return state;
+
+  state.cards = stream.cards.map((card) => ({
+    id: card.id,
+    name: card.name,
+    description: String(card.description || "").slice(0, 80)
+  }));
+  return state;
+}
+
+function base64Url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function createExtensionJwt(channelId) {
+  const header = base64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64Url(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + 60,
+    user_id: EXTENSION_OWNER_ID,
+    role: "external",
+    channel_id: String(channelId),
+    pubsub_perms: { send: ["broadcast"] }
+  }));
+  const unsigned = `${header}.${payload}`;
+  const secret = Buffer.from(EXTENSION_SECRET, "base64");
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(unsigned)
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+
+  return `${unsigned}.${signature}`;
+}
+
+async function broadcastViewerState(streamId) {
+  if (!isExtensionPubSubConfigured()) return;
+
+  const stream = streams[streamId];
+  if (!stream) return;
+
+  const message = JSON.stringify({
+    type: "state",
+    state: buildPubSubState(stream)
+  });
+
+  try {
+    const response = await fetch("https://api.twitch.tv/helix/extensions/pubsub", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${createExtensionJwt(streamId)}`,
+        "Client-Id": EXTENSION_CLIENT_ID,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        broadcaster_id: String(streamId),
+        target: ["broadcast"],
+        message
+      })
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      console.warn("Twitch Extension PubSub failed:", response.status, body.slice(0, 500));
+    }
+  } catch (error) {
+    console.warn("Twitch Extension PubSub request failed:", error.message);
+  }
+}
+
+function scheduleViewerStateBroadcast(streamId) {
+  if (!isExtensionPubSubConfigured() || !streamId) return;
+
+  let entry = pubSubBroadcasts.get(streamId);
+  if (!entry) {
+    entry = { timer: null, dirty: false, lastSentAt: 0 };
+    pubSubBroadcasts.set(streamId, entry);
+  }
+
+  entry.dirty = true;
+  if (entry.timer) return;
+
+  const delay = Math.max(0, entry.lastSentAt + PUBSUB_MIN_INTERVAL_MS - Date.now());
+  entry.timer = setTimeout(async () => {
+    entry.timer = null;
+    if (!entry.dirty) return;
+
+    entry.dirty = false;
+    entry.lastSentAt = Date.now();
+    await broadcastViewerState(streamId);
+
+    if (entry.dirty) scheduleViewerStateBroadcast(streamId);
+  }, delay);
 }
 
 function clampInt(value, fallback, min, max) {
@@ -368,6 +535,8 @@ app.post("/startRound", (req, res) => {
   stream.evilCount = evilCount;
   stream.cards = cleanCards(req.body.cards, cardCount);
   stream.userVotesByRound = Object.create(null);
+
+  scheduleViewerStateBroadcast(streamId);
 
   res.json({
     ok: true,
@@ -792,6 +961,8 @@ app.post("/deadCard", (req, res) => {
     stream.evilCount = clampInt(req.body.evilCount, stream.evilCount, 0, 10);
   }
 
+  scheduleViewerStateBroadcast(streamId);
+
   res.json({
     ok: true,
     streamId,
@@ -819,6 +990,8 @@ app.post("/cards", (req, res) => {
     stream.evilCount = clampInt(req.body.evilCount, stream.evilCount, 0, 10);
   }
 
+  scheduleViewerStateBroadcast(streamId);
+
   res.json({
     ok: true,
     streamId,
@@ -837,20 +1010,8 @@ app.get("/results", (req, res) => {
 
   const stream = getStream(streamId);
 
-  const votesObj = {};
-  for (let i=1;i<=stream.maxCards;i++)
-    votesObj[i] = stream.votes[i-1] || 0;
-
-  res.json({
-    ok:true,
-    roundId: stream.roundId,
-    maxCards: stream.maxCards,
-    maxVotesPerUser: stream.maxVotesPerUser,
-    evilCount: stream.evilCount,
-    deadCards: stream.deadCards,
-    votes: votesObj,
-    cards: stream.cards
-  });
+  res.setHeader("Cache-Control", "no-store");
+  res.json(buildResultsState(stream));
 });
 
 app.get("/voteList", (req, res) => {
@@ -911,6 +1072,8 @@ app.get("/startRound", (req, res) => {
   stream.evilCount = maxVotesPerUser;
   stream.cards = [];
   stream.userVotesByRound = Object.create(null);
+
+  scheduleViewerStateBroadcast(streamId);
 
   console.log("ROUND STARTED FOR:", streamId);
 
